@@ -11,7 +11,7 @@ pinned: false
 
 # SciQuery LLM
 
-![SciQuery Interface](assets/app_preview.png)
+![SciQuery Interface](assets/app_preview.jpg)
 
 ## Overview
 
