@@ -1,0 +1,16 @@
+__pycache__
+cache
+.DS_Store
+.env
+.venv
+dist
+build
+data
+docs
+logs
+notebooks
+tests
+.pytest_cache
+notes.txt
+todo.txt
+venv
