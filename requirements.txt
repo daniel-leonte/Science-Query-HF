@@ -9,3 +9,4 @@ tqdm>=4.65.0
 python-dotenv>=1.0.0
 dataclasses-json>=0.5.7
 typing_extensions>=4.5.0
+arxiv

@@ -5,7 +5,6 @@ cache
 .venv
 dist
 build
-data
 docs
 logs
 notebooks
