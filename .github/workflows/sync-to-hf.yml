@@ -25,8 +25,8 @@ jobs:
         # Add Hugging Face remote (if not exists)
         git remote add hf https://huggingface.co/spaces/danielleonte/Science-Query || true
         
-        # Set up authentication
-        git remote set-url hf https://user:$HF_TOKEN@huggingface.co/spaces/danielleonte/Science-Query
+        # Set up authentication (correct format for HF)
+        git remote set-url hf https://danielleonte:$HF_TOKEN@huggingface.co/spaces/danielleonte/Science-Query
         
-        # Push to Hugging Face
-        git push --force hf main 
+        # Push to Hugging Face (safer than --force)
+        git push hf main || git push --force-with-lease hf main 
