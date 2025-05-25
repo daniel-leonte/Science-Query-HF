@@ -6,7 +6,7 @@ import requests
 import os
 import time
 import json
-from typing import List, Tuple, Dict, Optional, Union, Any
+from typing import List, Tuple, Dict, Optional, Any
 from dataclasses import dataclass
 import logging
 from pathlib import Path
@@ -14,6 +14,14 @@ import pickle
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Constants
+DEFAULT_SIMILARITY_THRESHOLD = 0.4
+DEFAULT_K_RESULTS = 5
+DEFAULT_TEMPERATURE = 0.3
+MAX_TOKENS = 1024
+SIMILARITY_SCALE_FACTOR = 2.0
+CONFIDENCE_POSITION_DECAY = 0.5
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -42,14 +50,11 @@ class QueryResult:
         if not include_citations:
             return self.answer
             
-        answer = self.answer
-        # Add citation footer
-        answer += "\n\nSources:\n"
-        for i, doc in enumerate(self.documents):
-            answer += f"[{i+1}] {doc.metadata.get('title', 'Unknown')} "
-            answer += f"({doc.metadata.get('date', 'Unknown')}) - {doc.metadata.get('arxiv_id', 'Unknown')}\n"
+        citations = [f"[{i+1}] {doc.metadata.get('title', 'Unknown')} "
+                    f"({doc.metadata.get('date', 'Unknown')}) - {doc.metadata.get('arxiv_id', 'Unknown')}"
+                    for i, doc in enumerate(self.documents)]
         
-        return answer
+        return f"{self.answer}\n\nSources:\n" + "\n".join(citations)
 
 class SciQueryRAG:
     """
@@ -155,8 +160,8 @@ class SciQueryRAG:
     def retrieve(
         self, 
         query: str, 
-        k: int = 5, 
-        similarity_threshold: float = 0.4
+        k: int = DEFAULT_K_RESULTS, 
+        similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
     ) -> List[Document]:
         """
         Retrieve relevant documents based on a query.
@@ -186,26 +191,19 @@ class SciQueryRAG:
                     if indices[0][i] == -1:
                         continue
                         
-                    # Calculate similarity from L2 distance
-                    similarity = max(0.0, min(1.0, 1.0 - (dist**2) / 2.0))
+                    # Calculate similarity from L2 distance (optimized)
+                    similarity = max(0.0, 1.0 - dist / SIMILARITY_SCALE_FACTOR)
                     
                     if similarity >= similarity_threshold:
                         doc_idx = indices[0][i]
                         paper_row = self.df.iloc[doc_idx]
                         
-                        # Get content and metadata
+                        # Get content and metadata (optimized)
                         content = paper_row.get('abstract', '')
+                        metadata = {col: val for col, val in paper_row.items() 
+                                   if col != 'abstract' and not pd.isna(val)}
                         
-                        # Extract all available metadata
-                        metadata = {col: paper_row.get(col, '') for col in self.df.columns 
-                                   if col != 'abstract' and not pd.isna(paper_row.get(col, ''))}
-                        
-                        doc = Document(
-                            content=content,
-                            metadata=metadata,
-                            similarity=similarity
-                        )
-                        results.append(doc)
+                        results.append(Document(content=content, metadata=metadata, similarity=similarity))
                         
             return results
             
@@ -226,16 +224,12 @@ class SciQueryRAG:
         if not documents:
             return 0.0
             
-        # Extract similarities and weight by position
-        similarities = [doc.similarity for doc in documents]
-        
-        # Apply position-based weighting (higher weight to top results)
-        weights = np.linspace(1.0, 0.5, len(similarities))
-        weighted_similarities = np.multiply(similarities, weights)
+        # Extract similarities and apply position-based weighting
+        similarities = np.array([doc.similarity for doc in documents])
+        weights = np.linspace(1.0, CONFIDENCE_POSITION_DECAY, len(similarities))
         
         # Calculate weighted average similarity
-        weighted_avg = np.sum(weighted_similarities) / np.sum(weights)
-        return weighted_avg * 100.0
+        return (similarities @ weights) / weights.sum() * 100.0
 
     def generate_answer(self, context: str, query: str) -> str:
         """
@@ -254,54 +248,31 @@ class SciQueryRAG:
         API_URL = "https://router.huggingface.co/novita/v3/openai/chat/completions"
         headers = {"Authorization": f"Bearer {self.hf_token}", "Content-Type": "application/json"}
         
-        system_prompt = (
-            "You are SciQuery, a scientific research assistant specialized in AI research. "
-            "Answer the user's question based only on the provided context. "
-            "If the context doesn't contain relevant information to answer the question, "
-            "say that you don't have enough information. "
-            "Provide accurate, well-reasoned answers with clear explanations. "
-            "Use an academic, objective tone."
-        )
-        
-        prompt = f"Based on the following research paper extracts, please answer the question: {query}"
+        payload = {
+            "messages": [
+                {"role": "system", "content": (
+                    "You are SciQuery, a scientific research assistant specialized in AI research. "
+                    "Answer the user's question based only on the provided context. "
+                    "If the context doesn't contain relevant information to answer the question, "
+                    "say that you don't have enough information. "
+                    "Provide accurate, well-reasoned answers with clear explanations. "
+                    "Use an academic, objective tone.")},
+                {"role": "user", "content": f"Based on the following research paper extracts, please answer the question: {query}"},
+                {"role": "assistant", "content": "I'll help answer this based on the research papers."},
+                {"role": "user", "content": f"Context:\n{context}"}
+            ],
+            "model": self.llm_model_name,
+            "temperature": DEFAULT_TEMPERATURE,
+            "max_tokens": MAX_TOKENS,
+        }
 
         try:
-            payload = {
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    },
-                    {
-                        "role": "assistant",
-                        "content": "I'll help answer this based on the research papers."
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Context:\n{context}"
-                    }
-                ],
-                "model": self.llm_model_name,
-                "temperature": 0.3,  # Lower temperature for more factual responses
-                "max_tokens": 1024,  # Adjust based on response needs
-            }
-            
-            # Send request to API
             response = requests.post(API_URL, headers=headers, json=payload)
-            response.raise_for_status()  # Raise exception for HTTP errors
-            
+            response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"]
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"API request failed: {str(e)}")
+        except (requests.exceptions.RequestException, KeyError, IndexError, ValueError) as e:
+            logger.error(f"API error: {str(e)}")
             return f"Error generating answer: {str(e)}"
-        except (KeyError, IndexError, ValueError) as e:
-            logger.error(f"Error parsing API response: {str(e)}")
-            return "Error: Failed to parse the model's response."
         except Exception as e:
             logger.error(f"Unexpected error: {str(e)}")
             return "An unexpected error occurred while generating the answer."
@@ -316,27 +287,19 @@ class SciQueryRAG:
         Returns:
             Formatted context string
         """
-        context_parts = []
-        
-        for i, doc in enumerate(documents):
-            # Format with metadata
-            context_part = f"[DOCUMENT {i+1}]\n"
-            context_part += f"Title: {doc.metadata.get('title', 'Unknown')}\n"
-            if 'authors' in doc.metadata:
-                context_part += f"Authors: {doc.metadata.get('authors', 'Unknown')}\n"
-            if 'date' in doc.metadata:
-                context_part += f"Date: {doc.metadata.get('date', 'Unknown')}\n"
-            context_part += f"Content: {doc.content}\n"
-            
-            context_parts.append(context_part)
-            
-        return "\n".join(context_parts)
+        return "\n".join([
+            f"[DOCUMENT {i+1}]\nTitle: {doc.metadata.get('title', 'Unknown')}\n"
+            f"Authors: {doc.metadata.get('authors', 'Unknown')}\n"
+            f"Date: {doc.metadata.get('date', 'Unknown')}\n"
+            f"Content: {doc.content}"
+            for i, doc in enumerate(documents)
+        ])
 
     def query(
         self, 
         query: str, 
-        k: int = 5,
-        similarity_threshold: float = 0.4,
+        k: int = DEFAULT_K_RESULTS,
+        similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
         use_cache: Optional[bool] = None
     ) -> QueryResult:
         """
@@ -352,18 +315,15 @@ class SciQueryRAG:
             QueryResult containing answer, documents, confidence, and timing info
         """
         start_time = time.time()
-        
-        # Normalize query
         query = query.strip()
         
         # Check cache if enabled
         use_cache = self.use_cache if use_cache is None else use_cache
-        cache_key = f"{query}_{k}_{similarity_threshold}"
+        cache_key = f"{hash(query)}_{k}_{similarity_threshold}"
         
         if use_cache and hasattr(self, 'cache') and cache_key in self.cache:
             logger.info(f"Using cached result for query: {query}")
             result = self.cache[cache_key]
-            # Update query time
             result.query_time = time.time() - start_time
             return result
         
@@ -372,34 +332,22 @@ class SciQueryRAG:
         
         if not documents:
             logger.warning(f"No documents found for query: {query}")
-            return QueryResult(
+            result = QueryResult(
                 answer="I couldn't find relevant research papers to answer your question. Please try rephrasing or asking a different question.",
-                documents=[],
-                confidence=0.0,
-                query_time=time.time() - start_time
+                documents=[], confidence=0.0, query_time=time.time() - start_time
             )
-        
-        # Format context from documents
-        context = self.format_context(documents)
-        
-        # Generate answer
-        answer = self.generate_answer(context, query)
-        
-        # Compute confidence
-        confidence = self.compute_confidence(documents)
-        
-        # Create result
-        result = QueryResult(
-            answer=answer,
-            documents=documents,
-            confidence=confidence,
-            query_time=time.time() - start_time
-        )
+        else:
+            # Generate answer and compute confidence
+            context = self.format_context(documents)
+            answer = self.generate_answer(context, query)
+            confidence = self.compute_confidence(documents)
+            
+            result = QueryResult(answer=answer, documents=documents, 
+                               confidence=confidence, query_time=time.time() - start_time)
         
         # Cache result if caching is enabled
         if use_cache and hasattr(self, 'cache'):
             self.cache[cache_key] = result
-            # Periodically save cache
             if len(self.cache) % 10 == 0:
                 self.save_cache()
         
