@@ -105,6 +105,7 @@ The application will be available at http://localhost:7860.
 ## Project Structure
 
 - `collect_data.py`: Script for collecting papers from arXiv
+- `create_index.py`: Script for creating a FAISS index for the collected papers
 - `rag_pipeline.py`: Core RAG implementation with retrieval and generation
 - `app.py`: Web interface using Gradio
 - `data/`: Directory containing collected papers and FAISS index
