@@ -17,7 +17,7 @@ def create_faiss_index(
     index_path,
     embeddings_model='all-MiniLM-L6-v2',
     text_column='abstract',
-    batch_size=32
+    batch_size=64
 ):
     """
     Create a FAISS index from text data.
@@ -39,8 +39,7 @@ def create_faiss_index(
         raise ValueError(f"Column '{text_column}' not found in data file")
     
     # Filter out rows with missing or empty text
-    df = df.dropna(subset=[text_column])
-    df = df[df[text_column].str.strip().str.len() > 0]
+    df = df.dropna(subset=[text_column]).query(f"{text_column}.str.strip().str.len() > 0")
     
     logger.info(f"Loaded {len(df)} documents")
     
@@ -53,12 +52,14 @@ def create_faiss_index(
     dimension = test_embedding.shape[1]
     logger.info(f"Embedding dimension: {dimension}")
     
-    # Create FAISS index - use L2 distance (suitable for normalized vectors)
-    index = faiss.IndexFlatL2(dimension)
+    # Create FAISS index - use IVF for faster search on large datasets
+    index = faiss.IndexIVFFlat(faiss.IndexFlatL2(dimension), dimension, min(100, len(df)//100))
     
     # Process data in batches
     total_batches = (len(df) + batch_size - 1) // batch_size
     all_texts = df[text_column].tolist()
+    training_embeddings = model.encode(all_texts[:min(10000, len(all_texts))], normalize_embeddings=True).astype('float32')
+    index.train(training_embeddings)
     
     logger.info("Generating embeddings and adding to index")
     
@@ -66,12 +67,8 @@ def create_faiss_index(
         # Get batch of texts
         batch_texts = all_texts[i:i+batch_size]
         
-        # Generate embeddings
-        embeddings = model.encode(batch_texts, show_progress_bar=False)
-        
-        # Convert to correct format and normalize
-        embeddings = embeddings.astype('float32')
-        faiss.normalize_L2(embeddings)
+        # Generate embeddings and normalize in one step
+        embeddings = model.encode(batch_texts, show_progress_bar=False, normalize_embeddings=True).astype('float32')
         
         # Add to index
         index.add(embeddings)
@@ -93,10 +90,8 @@ def create_faiss_index(
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    metadata_path = os.path.splitext(index_path)[0] + "_metadata.txt"
-    with open(metadata_path, 'w') as f:
-        for key, value in metadata.items():
-            f.write(f"{key}: {value}\n")
+    with open(os.path.splitext(index_path)[0] + "_metadata.txt", 'w') as f:
+        f.write('\n'.join(f"{k}: {v}" for k, v in metadata.items()))
     
     elapsed_time = time.time() - start_time
     logger.info(f"Index created successfully with {index.ntotal} vectors")
@@ -114,7 +109,7 @@ if __name__ == "__main__":
                         help="Name of the sentence transformer model to use")
     parser.add_argument("--text_column", type=str, default="abstract", 
                         help="Name of the column containing the text to index")
-    parser.add_argument("--batch_size", type=int, default=32, 
+    parser.add_argument("--batch_size", type=int, default=64, 
                         help="Batch size for embedding generation")
     
     args = parser.parse_args()
