@@ -13,42 +13,22 @@ rag = SciQueryRAG(
 
 def process_query(query, include_citations, k, similarity_threshold):
     try:
-        # Validate inputs
         if not query or not query.strip():
             return "Please enter a question to continue.", "", 0, []
         
-        # Convert k to int and validate
-        k = int(k)
-        if k < 1:
-            k = 5
-        
-        # Convert threshold to float and validate
-        similarity_threshold = float(similarity_threshold)
-        if similarity_threshold < 0 or similarity_threshold > 1:
-            similarity_threshold = 0.4
+        k = max(1, int(k)) if k >= 1 else 5
+        similarity_threshold = max(0, min(1, float(similarity_threshold))) if 0 <= similarity_threshold <= 1 else 0.4
             
-        # Process the query
-        result = rag.query(
-            query=query,
-            k=k,
-            similarity_threshold=similarity_threshold
-        )
-        
-        # Format the answer based on citation preference
+        result = rag.query(query=query, k=k, similarity_threshold=similarity_threshold)
         answer = result.formatted_answer(include_citations=include_citations)
         
-        # Create source documents display - convert to list format for dataframe
-        sources = []
-        for doc in result.documents:
-            # Create a row as a list that matches the order of headers
-            source_row = [
-                doc.metadata.get('title', 'Unknown'),
-                doc.metadata.get('authors', 'Unknown'),
-                doc.metadata.get('date', 'Unknown'),
-                doc.metadata.get('arxiv_id', 'Unknown'),
-                f"{doc.similarity:.2f}"
-            ]
-            sources.append(source_row)
+        sources = [[
+            doc.metadata.get('title', 'Unknown'),
+            doc.metadata.get('authors', 'Unknown'), 
+            doc.metadata.get('date', 'Unknown'),
+            doc.metadata.get('arxiv_id', 'Unknown'),
+            f"{doc.similarity:.2f}"
+        ] for doc in result.documents]
             
         return answer, f"{result.confidence:.1f}%", result.query_time, sources
         
@@ -115,33 +95,21 @@ def build_interface():
         )
         
         # Examples
-        examples = gr.Examples(
-            examples=[
-                ["What are the latest advances in neural network optimization?"],
-                ["How does deep reinforcement learning work?"],
-                ["Explain the transformer architecture in simple terms"],
-                ["What are some applications of generative adversarial networks?"],
-                ["Compare and contrast supervised and unsupervised learning"]
-            ],
-            inputs=query_input
-        )
+        gr.Examples([
+            ["What are the latest advances in neural network optimization?"],
+            ["How does deep reinforcement learning work?"],
+            ["Explain the transformer architecture in simple terms"],
+            ["What are some applications of generative adversarial networks?"],
+            ["Compare and contrast supervised and unsupervised learning"]
+        ], inputs=query_input)
         
         # Set up event handlers
-        submit_btn.click(
-            process_query,
-            inputs=[query_input, include_citations, k_value, similarity_threshold],
-            outputs=[answer_output, confidence_output, time_output, sources_output]
-        )
-        query_input.submit(
-            process_query,
-            inputs=[query_input, include_citations, k_value, similarity_threshold],
-            outputs=[answer_output, confidence_output, time_output, sources_output]
-        )
-        clear_btn.click(
-            lambda: ("", "", 0, []),
-            inputs=None,
-            outputs=[answer_output, confidence_output, time_output, sources_output]
-        )
+        inputs = [query_input, include_citations, k_value, similarity_threshold]
+        outputs = [answer_output, confidence_output, time_output, sources_output]
+        
+        submit_btn.click(process_query, inputs=inputs, outputs=outputs)
+        query_input.submit(process_query, inputs=inputs, outputs=outputs)
+        clear_btn.click(lambda: ("", "", 0, []), outputs=outputs)
                 
         gr.Markdown(
             """
@@ -157,7 +125,5 @@ def build_interface():
         
     return interface
 
-# Launch the app
 if __name__ == "__main__":
-    interface = build_interface()
-    interface.launch(share=False)
+    build_interface().launch(share=False)
